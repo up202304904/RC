@@ -45,6 +45,7 @@ int llopen(LinkLayer connectionParameters) {
         ll_build_supervision_frame(setFrame, A_TX, C_SET);
 
         for (int attempt = 0; attempt <= link_max_retries; ++attempt) {
+            if (attempt > 0) total_retransmissions++;
             fprintf(stderr, "[llopen][TX] attempt=%d -> enviar SET\n", attempt);
 
             if (ll_write_all(setFrame, 5) != 0) {
@@ -52,6 +53,9 @@ int llopen(LinkLayer connectionParameters) {
                 closeSerialPort();
                 serial_fd = -1;
                 return -1;
+            } else {
+                total_frames_sent++;
+                total_bytes_sent += 5;
             }
 
             unsigned char A = 0, C = 0;
@@ -61,6 +65,9 @@ int llopen(LinkLayer connectionParameters) {
             if (ok == 1 && A == A_RX && C == C_UA) {
                 fprintf(stderr, "[llopen][TX] UA recebido, ligação bem sucedida\n");
                 return fd;
+            }
+            if (ok == 0) {
+                timeout_count++;
             }
             if (ok == -1) {
                 fprintf(stderr, "[llopen][TX] erro a ler supervision\n");
@@ -121,6 +128,9 @@ int llopen(LinkLayer connectionParameters) {
                             closeSerialPort();
                             serial_fd = -1;
                             return -1;
+                        } else {
+                            total_frames_sent++;
+                            total_bytes_sent += 5;
                         }
                         fprintf(stderr, "[llopen][RX] ligação bem sucedida\n");
                         return fd;
@@ -132,6 +142,7 @@ int llopen(LinkLayer connectionParameters) {
         }
 
         fprintf(stderr, "[llopen][RX] timeout à espera de SET\n");
+        timeout_count++;
         closeSerialPort();
         serial_fd = -1;
         return -1;
@@ -172,12 +183,16 @@ int llwrite(int fd, const unsigned char *buf, int bufSize) {
     frame[offset++] = FLAG;
 
     for (int attempt = 0; attempt <= link_max_retries; ++attempt) {
+        if (attempt > 0) total_retransmissions++;
         fprintf(stderr, "[llwrite] seq=%d attempt=%d -> enviar I-frame (%d bytes)\n",
                 tx_seq, attempt, bufSize);
 
         if (ll_write_all(frame, offset) != 0) {
             fprintf(stderr, "[llwrite] erro ao enviar frame\n");
             return -1;
+        } else {
+            total_frames_sent++;
+            total_bytes_sent += (unsigned long)offset;
         }
 
         unsigned char A = 0, C = 0;
@@ -187,6 +202,7 @@ int llwrite(int fd, const unsigned char *buf, int bufSize) {
         if (r == -1) return -1;
         if (r == 0) {
             fprintf(stderr, "[llwrite] timeout à espera de RR/REJ\n");
+            timeout_count++;
             continue;
         }
         if (A != A_RX) {
@@ -265,7 +281,10 @@ int llread(unsigned char *packet) {
                     ll_build_supervision_frame(rr, A_RX, ll_rr_for_expected(rx_expected_seq));
                     fprintf(stderr, "[llread] DUPLICATE seq=%d -> enviar RR(expected=%d) e descartar\n",
                             seq, rx_expected_seq);
-                    ll_write_all(rr, 5);
+                    if (ll_write_all(rr, 5) == 0) {
+                        total_frames_sent++;
+                        total_bytes_sent += 5;
+                    }
                     state = WAIT_FLAG;
                 } else {
                     fprintf(stderr, "[llread] seq inválido\n");
@@ -301,10 +320,14 @@ int llread(unsigned char *packet) {
                         ll_build_supervision_frame(rr, A_RX, ll_rr_for_next(seq));
                         fprintf(stderr, "[llread] BCC2 OK seq=%d, payload=%d -> enviar RR(next=%d)\n",
                                 seq, dataLen - 1, seq ^ 1);
-                        ll_write_all(rr, 5);
+                        if (ll_write_all(rr, 5) == 0) {
+                            total_frames_sent++;
+                            total_bytes_sent += 5;
+                        }
 
                         int payloadSize = dataLen - 1;
                         memcpy(packet, frameData, (size_t)payloadSize);
+                        total_bytes_received += (unsigned long)payloadSize;
                         rx_expected_seq ^= 1;
                         fprintf(stderr, "[llread] entregue payload size=%d, nextExpected=%d\n",
                                 payloadSize, rx_expected_seq);
@@ -314,7 +337,10 @@ int llread(unsigned char *packet) {
                         ll_build_supervision_frame(rej, A_RX, ll_rej_for_expected(rx_expected_seq));
                         fprintf(stderr, "[llread] BCC2 ERR seq=%d -> enviar REJ(expected=%d)\n",
                                 seq, rx_expected_seq);
-                        ll_write_all(rej, 5);
+                        if (ll_write_all(rej, 5) == 0) {
+                            total_frames_sent++;
+                            total_bytes_sent += 5;
+                        }
                         state = WAIT_FLAG;
                         dataLen = 0;
                         escape = 0;
@@ -374,6 +400,7 @@ int llclose(int fd) {
         ll_build_supervision_frame(ua, A_RX, C_UA);
 
         for (int attempt = 0; attempt <= link_max_retries; ++attempt) {
+            if (attempt > 0) total_retransmissions++;
             fprintf(stderr, "[llclose][TX] attempt=%d -> enviar DISC\n", attempt);
 
             if (ll_write_all(disc, 5) != 0) {
@@ -381,6 +408,9 @@ int llclose(int fd) {
                 closeSerialPort();
                 serial_fd = -1;
                 return -1;
+            } else {
+                total_frames_sent++;
+                total_bytes_sent += 5;
             }
             state = WAIT_FLAG;
             int elapsed = 0;
@@ -416,7 +446,23 @@ int llclose(int fd) {
                     case WAIT_FLAG_END:
                         if (byte == FLAG) {
                             fprintf(stderr, "[llclose][TX] DISC recebido -> a enviar UA e fechar\n");
-                            ll_write_all(ua, 5);
+                            if (ll_write_all(ua, 5) != 0) {
+                                fprintf(stderr, "[llclose][TX] erro a enviar UA final\n");
+                                closeSerialPort();
+                                serial_fd = -1;
+                                return -1;
+                            } else {
+                                total_frames_sent++;
+                                total_bytes_sent += 5;
+                            }
+                            fprintf(stderr, "[llclose][TX] UA recebido -> fechar ligação\n");
+                            fprintf(stderr, "\n=== Transmitter Statistics ===\n");
+                            fprintf(stderr, "Bytes sent:          %lu\n", total_bytes_sent);
+                            fprintf(stderr, "Bytes received:      %lu\n", total_bytes_received);
+                            fprintf(stderr, "Frames sent:         %lu\n", total_frames_sent);
+                            fprintf(stderr, "Retransmissions:     %lu\n", total_retransmissions);
+                            fprintf(stderr, "Timeouts:            %lu\n", timeout_count);
+                            fprintf(stderr, "===============================\n");
                             closeSerialPort();
                             serial_fd = -1;
                             return 0;
@@ -429,6 +475,7 @@ int llclose(int fd) {
                     }
                 }
             }
+            if (elapsed >= link_timeout_ds) timeout_count++;
         }
 
         fprintf(stderr, "[llclose][TX] esgotou tentativas\n");
@@ -475,6 +522,9 @@ int llclose(int fd) {
                     closeSerialPort();
                     serial_fd = -1;
                     return -1;
+                } else {
+                    total_frames_sent++;
+                    total_bytes_sent += 5;
                 }
                 unsigned char b = 0;
                 int innerState = WAIT_FLAG;
@@ -511,7 +561,7 @@ int llclose(int fd) {
                         case WAIT_FLAG_END:
                             if (b == FLAG) {
                                 fprintf(stderr, "[llclose][RX] UA recebido -> fechar ligação\n");
-                                fprintf(stderr, "\n=== Transmission Statistics ===\n");
+                                fprintf(stderr, "\n=== Receiver Statistics ===\n");
                                 fprintf(stderr, "Bytes sent:          %lu\n", total_bytes_sent);
                                 fprintf(stderr, "Bytes received:      %lu\n", total_bytes_received);
                                 fprintf(stderr, "Frames sent:         %lu\n", total_frames_sent);
@@ -532,6 +582,7 @@ int llclose(int fd) {
 
                 }
                 fprintf(stderr, "[llclose][RX] timeout à espera de UA\n");
+                timeout_count++;
                 closeSerialPort();
                 serial_fd = -1;
                 return -1;
