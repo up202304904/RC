@@ -22,7 +22,12 @@ static int link_timeout_ds = 10;
 static int link_max_retries = 3;
 static int serial_fd = -1;
 
-/* ---------------------------------------------------- */
+//variáveis para as estatísticas finais
+static unsigned long total_frames_sent = 0;
+static unsigned long total_retransmissions = 0;
+static unsigned long total_bytes_sent = 0;
+static unsigned long total_bytes_received = 0;
+static unsigned long timeout_count = 0;
 
 int llopen(LinkLayer connectionParameters) {
     int fd = openSerialPort(connectionParameters.serialPort, connectionParameters.baudRate);
@@ -90,7 +95,6 @@ int llopen(LinkLayer connectionParameters) {
                 continue;
             }
             if (r == 1) {
-                /* Log simples de estado → byte */
                 switch (state) {
                 case WAIT_FLAG:
                     if (byte == FLAG) state = WAIT_A;
@@ -433,7 +437,7 @@ int llclose(int fd) {
         return -1;
     }
 
-    /* RX */
+    // RX 
     unsigned char discResp[5];
     ll_build_supervision_frame(discResp, A_RX, C_DISC);
 
@@ -507,6 +511,13 @@ int llclose(int fd) {
                         case WAIT_FLAG_END:
                             if (b == FLAG) {
                                 fprintf(stderr, "[llclose][RX] UA recebido -> fechar ligação\n");
+                                fprintf(stderr, "\n=== Transmission Statistics ===\n");
+                                fprintf(stderr, "Bytes sent:          %lu\n", total_bytes_sent);
+                                fprintf(stderr, "Bytes received:      %lu\n", total_bytes_received);
+                                fprintf(stderr, "Frames sent:         %lu\n", total_frames_sent);
+                                fprintf(stderr, "Retransmissions:     %lu\n", total_retransmissions);
+                                fprintf(stderr, "Timeouts:            %lu\n", timeout_count);
+                                fprintf(stderr, "===============================\n");
                                 closeSerialPort();
                                 serial_fd = -1;
                                 return 0;
@@ -518,6 +529,7 @@ int llclose(int fd) {
                             break;
                         }
                     }
+
                 }
                 fprintf(stderr, "[llclose][RX] timeout à espera de UA\n");
                 closeSerialPort();
